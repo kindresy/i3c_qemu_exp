@@ -1,0 +1,17 @@
+diff --git a/drivers/i3c/Kconfig b/drivers/i3c/Kconfig
+index 626c54b38..45ef235f6 100644
+--- a/drivers/i3c/Kconfig
++++ b/drivers/i3c/Kconfig
+@@ -21,6 +21,12 @@ menuconfig I3C
+ 
+ if I3C
+ source "drivers/i3c/master/Kconfig"
++
++config I3C_SYNTHETIC_TARGET_TEST
++	bool "Synthetic I3C target private SDR test"
++	help
++	  Built-in test driver for the qemu_exp AST2600 synthetic I3C target.
++	  It verifies basic private SDR read/write transfers during probe.
+ endif # I3C
+ 
+ config I3C_OR_I2C

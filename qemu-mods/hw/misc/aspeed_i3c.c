@@ -3,7 +3,7 @@
  *
  * Minimal DesignWare-compatible controller model used to let the AST2600
  * Linux I3C master driver complete command transfers in QEMU. The model
- * includes one synthetic I3C target for DAA, basic CCC reads, and private
+ * includes synthetic I3C targets for DAA, basic CCC reads, and private
  * SDR register-transfer validation.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -14,16 +14,21 @@
 #include "qemu/log.h"
 #include "hw/irq.h"
 #include "hw/misc/aspeed_i3c.h"
+#include "hw/qdev-properties.h"
 #include "migration/vmstate.h"
 
+#define I3C_DEVICE_CTRL                 0x00
+#define I3C_DEVICE_CTRL_HOT_JOIN_NACK   BIT(8)
 #define I3C_COMMAND_QUEUE_PORT          0x0c
 #define I3C_RESPONSE_QUEUE_PORT         0x10
 #define I3C_RX_TX_DATA_PORT             0x14
+#define I3C_IBI_QUEUE_STATUS            0x18
 #define I3C_RESET_CTRL                  0x34
 #define I3C_INTR_STATUS                 0x3c
 #define I3C_INTR_STATUS_EN              0x40
 #define I3C_INTR_SIGNAL_EN              0x44
 #define I3C_INTR_FORCE                  0x48
+#define I3C_INTR_IBI_THLD_STAT          BIT(2)
 #define I3C_INTR_RESP_READY_STAT        BIT(4)
 #define I3C_QUEUE_STATUS_LEVEL          0x4c
 #define I3C_DATA_BUFFER_STATUS_LEVEL    0x50
@@ -37,10 +42,13 @@
 #define I3C_COMMAND_PORT_ARG_LEN(x)     (((x) >> 16) & 0xffff)
 #define I3C_COMMAND_PORT_CP             BIT(15)
 #define I3C_COMMAND_PORT_READ_TRANSFER  BIT(28)
+#define I3C_COMMAND_PORT_TOC            BIT(30)
 #define I3C_RESPONSE_PORT_TID(x)        (((x) & 0xf) << 24)
 #define I3C_RESPONSE_PORT_ERR(x)        (((x) & 0xf) << 28)
 
 #define I3C_CCC_ENTDAA                  0x07
+#define I3C_CCC_DIRECT_ENEC             0x80
+#define I3C_CCC_DIRECT_DISEC            0x81
 #define I3C_CCC_GETPID                  0x8d
 #define I3C_CCC_GETBCR                  0x8e
 #define I3C_CCC_GETDCR                  0x8f
@@ -57,8 +65,75 @@
 #define I3C_SYNTH_DCR                   0x42
 #define I3C_SYNTH_TEST_REG              0x10
 #define I3C_SYNTH_TEST_RESET_VALUE      0xa5
+#define I3C_SYNTH_IBI_VALUE             0x7c
+#define I3C_SYNTH_INVALID_DAT_INDEX     0xff
+#define I3C_CCC_EVENT_SIR               BIT(0)
 
 #define TO_REG(addr) ((addr) / sizeof(uint32_t))
+
+static uint32_t aspeed_i3c_active_target_count(AspeedI3CState *s)
+{
+    uint32_t count = s->synth_target_count;
+
+    if (s->late_targets_visible) {
+        count += s->synth_late_target_count;
+    }
+
+    return MIN(count, (uint32_t)ASPEED_I3C_SYNTH_TARGET_COUNT);
+}
+
+static uint32_t aspeed_i3c_reset_target_count(AspeedI3CState *s)
+{
+    return MIN(s->synth_target_count + s->synth_late_target_count,
+               (uint32_t)ASPEED_I3C_SYNTH_TARGET_COUNT);
+}
+
+static uint64_t aspeed_i3c_target_pid(AspeedI3CState *s, int target)
+{
+    return target ? s->synth_pid1 : s->synth_pid0;
+}
+
+static uint8_t aspeed_i3c_target_bcr(AspeedI3CState *s, int target)
+{
+    return target ? s->synth_bcr1 : s->synth_bcr0;
+}
+
+static uint8_t aspeed_i3c_target_dcr(AspeedI3CState *s, int target)
+{
+    return target ? s->synth_dcr1 : s->synth_dcr0;
+}
+
+static uint8_t aspeed_i3c_target_reset_value(AspeedI3CState *s, int target)
+{
+    return target ? s->synth_reset_value1 : s->synth_reset_value0;
+}
+
+static int aspeed_i3c_find_target_by_dev_index(AspeedI3CState *s,
+                                               uint32_t dev_index)
+{
+    int i;
+
+    for (i = 0; i < aspeed_i3c_active_target_count(s); i++) {
+        if (s->target_assigned[i] && s->target_dat_index[i] == dev_index) {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+static int aspeed_i3c_find_unassigned_target(AspeedI3CState *s)
+{
+    int i;
+
+    for (i = 0; i < aspeed_i3c_active_target_count(s); i++) {
+        if (!s->target_assigned[i]) {
+            return i;
+        }
+    }
+
+    return -1;
+}
 
 static void aspeed_i3c_update_irq(AspeedI3CState *s)
 {
@@ -118,40 +193,104 @@ static void aspeed_i3c_clear_tx_fifo(AspeedI3CState *s)
     s->tx_len = 0;
 }
 
-static void aspeed_i3c_prepare_private_read(AspeedI3CState *s, uint32_t len)
+static void aspeed_i3c_clear_ibi(AspeedI3CState *s)
+{
+    s->ibi_status = 0;
+    memset(s->ibi_payload, 0, sizeof(s->ibi_payload));
+    s->ibi_payload_len = 0;
+    s->ibi_payload_pos = 0;
+    s->ibi_status_pending = false;
+    s->regs[TO_REG(I3C_INTR_STATUS)] &= ~I3C_INTR_IBI_THLD_STAT;
+    aspeed_i3c_update_irq(s);
+}
+
+static void aspeed_i3c_queue_ibi(AspeedI3CState *s, int target)
+{
+    if (target < 0 || !s->target_dyn_addr[target]) {
+        return;
+    }
+
+    s->ibi_status = ((uint32_t)s->target_dyn_addr[target] << 9) |
+                    BIT(8) | 1;
+    s->ibi_payload[0] = I3C_SYNTH_IBI_VALUE;
+    s->ibi_payload_len = 1;
+    s->ibi_payload_pos = 0;
+    s->ibi_status_pending = true;
+    s->regs[TO_REG(I3C_INTR_STATUS)] |= I3C_INTR_IBI_THLD_STAT;
+    aspeed_i3c_update_irq(s);
+}
+
+static uint32_t aspeed_i3c_read_ibi_queue(AspeedI3CState *s)
+{
+    uint32_t value = 0;
+    int i;
+
+    if (s->ibi_status_pending) {
+        s->ibi_status_pending = false;
+        if (!s->ibi_payload_len) {
+            aspeed_i3c_clear_ibi(s);
+        }
+        return s->ibi_status;
+    }
+
+    for (i = 0; i < 4 && s->ibi_payload_pos < s->ibi_payload_len; i++) {
+        value |= s->ibi_payload[s->ibi_payload_pos++] << (i * 8);
+    }
+
+    if (s->ibi_payload_pos >= s->ibi_payload_len) {
+        aspeed_i3c_clear_ibi(s);
+    }
+
+    return value;
+}
+
+static void aspeed_i3c_prepare_private_read(AspeedI3CState *s, int target,
+                                            uint32_t len)
 {
     uint8_t payload[ASPEED_I3C_RX_FIFO_SIZE];
     uint8_t n = MIN(len, (uint32_t)sizeof(payload));
     int i;
 
     for (i = 0; i < n; i++) {
-        payload[i] = s->target_regs[(uint8_t)(s->target_reg_ptr + i)];
+        payload[i] = s->target_regs[target]
+                                   [(uint8_t)(s->target_reg_ptr[target] + i)];
     }
-    s->target_reg_ptr += n;
+    s->target_reg_ptr[target] += n;
     aspeed_i3c_load_rx_fifo(s, payload, n);
 }
 
-static void aspeed_i3c_apply_private_write(AspeedI3CState *s, uint32_t len)
+static void aspeed_i3c_apply_private_write(AspeedI3CState *s, int target,
+                                           uint32_t cmd_lo, uint32_t len,
+                                           uint32_t *error)
 {
     uint8_t n = MIN(len, (uint32_t)s->tx_len);
     int i;
 
+    *error = 0;
+
     if (!n) {
         aspeed_i3c_clear_tx_fifo(s);
+        *error = I3C_RESPONSE_ERROR_IBA_NACK;
         return;
     }
 
-    s->target_reg_ptr = s->tx_fifo[0];
+    if (n == 1 && (cmd_lo & I3C_COMMAND_PORT_TOC)) {
+        aspeed_i3c_clear_tx_fifo(s);
+        *error = I3C_RESPONSE_ERROR_IBA_NACK;
+        return;
+    }
+
+    s->target_reg_ptr[target] = s->tx_fifo[0];
     for (i = 1; i < n; i++) {
-        s->target_regs[s->target_reg_ptr++] = s->tx_fifo[i];
+        s->target_regs[target][s->target_reg_ptr[target]++] = s->tx_fifo[i];
     }
 
     aspeed_i3c_clear_tx_fifo(s);
 }
 
 static void aspeed_i3c_prepare_ccc_read(AspeedI3CState *s, uint32_t cmd_hi,
-                                        uint32_t cmd_lo, uint32_t *data_len,
-                                        uint32_t *error)
+                                        uint32_t cmd_lo, int target,
+                                        uint32_t *data_len, uint32_t *error)
 {
     uint8_t payload[8];
     uint32_t len = I3C_COMMAND_PORT_ARG_LEN(cmd_hi);
@@ -166,27 +305,70 @@ static void aspeed_i3c_prepare_ccc_read(AspeedI3CState *s, uint32_t cmd_hi,
 
     switch (I3C_COMMAND_PORT_CMD(cmd_lo)) {
     case I3C_CCC_GETPID:
-        payload[0] = extract64(I3C_SYNTH_PID, 40, 8);
-        payload[1] = extract64(I3C_SYNTH_PID, 32, 8);
-        payload[2] = extract64(I3C_SYNTH_PID, 24, 8);
-        payload[3] = extract64(I3C_SYNTH_PID, 16, 8);
-        payload[4] = extract64(I3C_SYNTH_PID, 8, 8);
-        payload[5] = extract64(I3C_SYNTH_PID, 0, 8);
+        payload[0] = extract64(aspeed_i3c_target_pid(s, target), 40, 8);
+        payload[1] = extract64(aspeed_i3c_target_pid(s, target), 32, 8);
+        payload[2] = extract64(aspeed_i3c_target_pid(s, target), 24, 8);
+        payload[3] = extract64(aspeed_i3c_target_pid(s, target), 16, 8);
+        payload[4] = extract64(aspeed_i3c_target_pid(s, target), 8, 8);
+        payload[5] = extract64(aspeed_i3c_target_pid(s, target), 0, 8);
         *data_len = MIN(len, 6U);
         aspeed_i3c_load_rx_fifo(s, payload, *data_len);
         break;
     case I3C_CCC_GETBCR:
-        payload[0] = I3C_SYNTH_BCR;
+        payload[0] = aspeed_i3c_target_bcr(s, target);
         *data_len = MIN(len, 1U);
         aspeed_i3c_load_rx_fifo(s, payload, *data_len);
         break;
     case I3C_CCC_GETDCR:
-        payload[0] = I3C_SYNTH_DCR;
+        payload[0] = aspeed_i3c_target_dcr(s, target);
         *data_len = MIN(len, 1U);
         aspeed_i3c_load_rx_fifo(s, payload, *data_len);
         break;
     default:
         break;
+    }
+}
+
+static void aspeed_i3c_apply_ccc_write(AspeedI3CState *s, int target,
+                                       uint32_t cmd_lo)
+{
+    if (I3C_COMMAND_PORT_CMD(cmd_lo) == I3C_CCC_DIRECT_ENEC &&
+        s->tx_len >= 1 && (s->tx_fifo[0] & I3C_CCC_EVENT_SIR)) {
+        aspeed_i3c_queue_ibi(s, target);
+    }
+
+    aspeed_i3c_clear_tx_fifo(s);
+}
+
+static void aspeed_i3c_assign_targets(AspeedI3CState *s, uint32_t dev_index,
+                                      uint32_t *data_len, uint32_t *error)
+{
+    uint32_t highest_assigned = dev_index;
+    bool assigned = false;
+    int target;
+
+    *error = I3C_RESPONSE_ERROR_IBA_NACK;
+
+    while (dev_index < I3C_DAT_DEPTH) {
+        target = aspeed_i3c_find_unassigned_target(s);
+        if (target < 0) {
+            break;
+        }
+
+        s->target_dyn_addr[target] =
+            I3C_DAT_DYNAMIC_ADDR(s->regs[TO_REG(I3C_DAT_START_ADDR +
+                                                dev_index * 4)]);
+        s->target_dat_index[target] = dev_index;
+        s->target_assigned[target] = true;
+        highest_assigned = dev_index;
+        assigned = true;
+        dev_index++;
+    }
+
+    if (assigned) {
+        *data_len = I3C_DAT_DEPTH - highest_assigned - 1;
+    } else {
+        *data_len = I3C_DAT_DEPTH - MIN(dev_index, (uint32_t)I3C_DAT_DEPTH);
     }
 }
 
@@ -205,32 +387,44 @@ static void aspeed_i3c_push_response(AspeedI3CState *s, uint32_t cmd_lo)
 
     switch (I3C_COMMAND_PORT_CMD(cmd_lo)) {
     case I3C_CCC_ENTDAA:
-        if (s->target_present && !s->target_assigned &&
-            dev_index < I3C_DAT_DEPTH) {
-            hwaddr dat_addr = I3C_DAT_START_ADDR + dev_index * 4;
-
-            s->target_dyn_addr =
-                I3C_DAT_DYNAMIC_ADDR(s->regs[TO_REG(dat_addr)]);
-            s->target_assigned = true;
-            data_len = I3C_DAT_DEPTH - dev_index - 1;
-            error = I3C_RESPONSE_ERROR_IBA_NACK;
-        } else {
-            data_len = I3C_DAT_DEPTH - MIN(dev_index, I3C_DAT_DEPTH);
-            error = I3C_RESPONSE_ERROR_IBA_NACK;
-        }
+        aspeed_i3c_assign_targets(s, dev_index, &data_len, &error);
         break;
     default:
         if (cmd_lo & I3C_COMMAND_PORT_CP) {
-            aspeed_i3c_prepare_ccc_read(s, s->pending_cmd_hi, cmd_lo,
-                                        &data_len, &error);
+            int target = aspeed_i3c_find_target_by_dev_index(s, dev_index);
+
+            if (target < 0) {
+                error = I3C_RESPONSE_ERROR_IBA_NACK;
+                break;
+            }
+            if (cmd_lo & I3C_COMMAND_PORT_READ_TRANSFER) {
+                aspeed_i3c_prepare_ccc_read(s, s->pending_cmd_hi, cmd_lo,
+                                            target, &data_len, &error);
+            } else {
+                aspeed_i3c_apply_ccc_write(s, target, cmd_lo);
+            }
         } else if (cmd_lo & I3C_COMMAND_PORT_READ_TRANSFER) {
+            int target = aspeed_i3c_find_target_by_dev_index(s, dev_index);
+
+            if (target < 0) {
+                error = I3C_RESPONSE_ERROR_IBA_NACK;
+                break;
+            }
             data_len = I3C_COMMAND_PORT_ARG_LEN(s->pending_cmd_hi);
             data_len = MIN(data_len, (uint32_t)ASPEED_I3C_RX_FIFO_SIZE);
-            aspeed_i3c_prepare_private_read(s, data_len);
+            aspeed_i3c_prepare_private_read(s, target, data_len);
         } else {
+            int target = aspeed_i3c_find_target_by_dev_index(s, dev_index);
+
+            if (target < 0) {
+                aspeed_i3c_clear_tx_fifo(s);
+                error = I3C_RESPONSE_ERROR_IBA_NACK;
+                break;
+            }
             data_len = 0;
             aspeed_i3c_apply_private_write(
-                s, I3C_COMMAND_PORT_ARG_LEN(s->pending_cmd_hi));
+                s, target, cmd_lo,
+                I3C_COMMAND_PORT_ARG_LEN(s->pending_cmd_hi), &error);
         }
         break;
     }
@@ -277,6 +471,7 @@ static void aspeed_i3c_reset_fifos(AspeedI3CState *s)
     s->pending_cmd_hi = 0;
     aspeed_i3c_clear_rx_fifo(s);
     aspeed_i3c_clear_tx_fifo(s);
+    aspeed_i3c_clear_ibi(s);
     s->regs[TO_REG(I3C_INTR_STATUS)] &= ~I3C_INTR_RESP_READY_STAT;
     aspeed_i3c_update_irq(s);
 }
@@ -294,10 +489,13 @@ static uint64_t aspeed_i3c_read(void *opaque, hwaddr addr, unsigned int size)
         return aspeed_i3c_pop_response(s);
     case I3C_RX_TX_DATA_PORT:
         return aspeed_i3c_read_rx_fifo(s);
+    case I3C_IBI_QUEUE_STATUS:
+        return aspeed_i3c_read_ibi_queue(s);
     case I3C_RESET_CTRL:
         return 0;
     case I3C_QUEUE_STATUS_LEVEL:
-        return (s->resp_count << 8) | I3C_CMD_FIFO_DEPTH;
+        return ((s->ibi_status_pending ? 1 : 0) << 24) |
+               (s->resp_count << 8) | I3C_CMD_FIFO_DEPTH;
     case I3C_DATA_BUFFER_STATUS_LEVEL:
         return I3C_DATA_FIFO_DEPTH;
     case I3C_DEVICE_ADDR_TABLE_POINTER:
@@ -322,6 +520,14 @@ static void aspeed_i3c_write(void *opaque, hwaddr addr, uint64_t value,
     }
 
     switch (addr) {
+    case I3C_DEVICE_CTRL:
+        if ((s->regs[TO_REG(addr)] & I3C_DEVICE_CTRL_HOT_JOIN_NACK) &&
+            !(val32 & I3C_DEVICE_CTRL_HOT_JOIN_NACK) &&
+            s->synth_late_target_count) {
+            s->late_targets_visible = true;
+        }
+        s->regs[TO_REG(addr)] = val32;
+        break;
     case I3C_COMMAND_QUEUE_PORT:
         if (s->have_cmd_hi) {
             s->have_cmd_hi = false;
@@ -378,14 +584,20 @@ static void aspeed_i3c_realize(DeviceState *dev, Error **errp)
 static void aspeed_i3c_reset(DeviceState *dev)
 {
     AspeedI3CState *s = ASPEED_I3C(dev);
+    int i;
 
     memset(s->regs, 0, sizeof(s->regs));
     memset(s->target_regs, 0, sizeof(s->target_regs));
-    s->target_regs[I3C_SYNTH_TEST_REG] = I3C_SYNTH_TEST_RESET_VALUE;
-    s->target_reg_ptr = 0;
-    s->target_present = true;
-    s->target_assigned = false;
-    s->target_dyn_addr = 0;
+    memset(s->target_reg_ptr, 0, sizeof(s->target_reg_ptr));
+    memset(s->target_assigned, 0, sizeof(s->target_assigned));
+    memset(s->target_dyn_addr, 0, sizeof(s->target_dyn_addr));
+    memset(s->target_dat_index, I3C_SYNTH_INVALID_DAT_INDEX,
+           sizeof(s->target_dat_index));
+    s->late_targets_visible = false;
+    for (i = 0; i < aspeed_i3c_reset_target_count(s); i++) {
+        s->target_regs[i][I3C_SYNTH_TEST_REG] =
+            aspeed_i3c_target_reset_value(s, i);
+    }
     aspeed_i3c_reset_fifos(s);
 }
 
@@ -406,14 +618,60 @@ static const VMStateDescription aspeed_i3c_vmstate = {
         VMSTATE_UINT8(rx_len, AspeedI3CState),
         VMSTATE_UINT8_ARRAY(tx_fifo, AspeedI3CState, ASPEED_I3C_TX_FIFO_SIZE),
         VMSTATE_UINT8(tx_len, AspeedI3CState),
-        VMSTATE_UINT8_ARRAY(target_regs, AspeedI3CState,
-                            ASPEED_I3C_TARGET_REG_SIZE),
-        VMSTATE_UINT8(target_reg_ptr, AspeedI3CState),
-        VMSTATE_BOOL(target_present, AspeedI3CState),
-        VMSTATE_BOOL(target_assigned, AspeedI3CState),
-        VMSTATE_UINT8(target_dyn_addr, AspeedI3CState),
+        VMSTATE_UINT32(ibi_status, AspeedI3CState),
+        VMSTATE_UINT8_ARRAY(ibi_payload, AspeedI3CState,
+                            ASPEED_I3C_RX_FIFO_SIZE),
+        VMSTATE_UINT8(ibi_payload_len, AspeedI3CState),
+        VMSTATE_UINT8(ibi_payload_pos, AspeedI3CState),
+        VMSTATE_BOOL(ibi_status_pending, AspeedI3CState),
+        VMSTATE_UINT32(synth_target_count, AspeedI3CState),
+        VMSTATE_UINT64(synth_pid0, AspeedI3CState),
+        VMSTATE_UINT64(synth_pid1, AspeedI3CState),
+        VMSTATE_UINT8(synth_bcr0, AspeedI3CState),
+        VMSTATE_UINT8(synth_bcr1, AspeedI3CState),
+        VMSTATE_UINT8(synth_dcr0, AspeedI3CState),
+        VMSTATE_UINT8(synth_dcr1, AspeedI3CState),
+        VMSTATE_UINT8(synth_reset_value0, AspeedI3CState),
+        VMSTATE_UINT8(synth_reset_value1, AspeedI3CState),
+        VMSTATE_UINT32(synth_late_target_count, AspeedI3CState),
+        VMSTATE_BOOL(late_targets_visible, AspeedI3CState),
+        VMSTATE_UINT8_2DARRAY(target_regs, AspeedI3CState,
+                              ASPEED_I3C_SYNTH_TARGET_COUNT,
+                              ASPEED_I3C_TARGET_REG_SIZE),
+        VMSTATE_UINT8_ARRAY(target_reg_ptr, AspeedI3CState,
+                            ASPEED_I3C_SYNTH_TARGET_COUNT),
+        VMSTATE_BOOL_ARRAY(target_assigned, AspeedI3CState,
+                           ASPEED_I3C_SYNTH_TARGET_COUNT),
+        VMSTATE_UINT8_ARRAY(target_dyn_addr, AspeedI3CState,
+                            ASPEED_I3C_SYNTH_TARGET_COUNT),
+        VMSTATE_UINT8_ARRAY(target_dat_index, AspeedI3CState,
+                            ASPEED_I3C_SYNTH_TARGET_COUNT),
         VMSTATE_END_OF_LIST(),
     },
+};
+
+static Property aspeed_i3c_properties[] = {
+    DEFINE_PROP_UINT32("synth-target-count", AspeedI3CState,
+                       synth_target_count, ASPEED_I3C_SYNTH_TARGET_COUNT),
+    DEFINE_PROP_UINT64("synth-pid0", AspeedI3CState, synth_pid0,
+                       I3C_SYNTH_PID),
+    DEFINE_PROP_UINT64("synth-pid1", AspeedI3CState, synth_pid1,
+                       I3C_SYNTH_PID + 1),
+    DEFINE_PROP_UINT8("synth-bcr0", AspeedI3CState, synth_bcr0,
+                      I3C_SYNTH_BCR),
+    DEFINE_PROP_UINT8("synth-bcr1", AspeedI3CState, synth_bcr1,
+                      I3C_SYNTH_BCR),
+    DEFINE_PROP_UINT8("synth-dcr0", AspeedI3CState, synth_dcr0,
+                      I3C_SYNTH_DCR),
+    DEFINE_PROP_UINT8("synth-dcr1", AspeedI3CState, synth_dcr1,
+                      I3C_SYNTH_DCR),
+    DEFINE_PROP_UINT8("synth-reset-value0", AspeedI3CState,
+                      synth_reset_value0, I3C_SYNTH_TEST_RESET_VALUE),
+    DEFINE_PROP_UINT8("synth-reset-value1", AspeedI3CState,
+                      synth_reset_value1, I3C_SYNTH_TEST_RESET_VALUE),
+    DEFINE_PROP_UINT32("synth-late-target-count", AspeedI3CState,
+                       synth_late_target_count, 0),
+    DEFINE_PROP_END_OF_LIST(),
 };
 
 static void aspeed_i3c_class_init(ObjectClass *klass, void *data)
@@ -424,6 +682,7 @@ static void aspeed_i3c_class_init(ObjectClass *klass, void *data)
     dc->realize = aspeed_i3c_realize;
     dc->reset = aspeed_i3c_reset;
     dc->vmsd = &aspeed_i3c_vmstate;
+    device_class_set_props(dc, aspeed_i3c_properties);
 }
 
 static const TypeInfo aspeed_i3c_info = {
