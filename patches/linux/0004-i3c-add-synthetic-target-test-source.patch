@@ -1,21 +1,21 @@
 From: qemu_exp
 Subject: [PATCH] i3c: add synthetic-target-test driver source
 
-New built-in test driver that verifies basic private SDR read/write
-transfers and a malformed private SDR write rejection against the QEMU
-AST2600 synthetic I3C target during probe.
+New built-in test driver that verifies private SDR read/write transfers,
+malformed private SDR write rejection, and a minimal IBI receive path
+against the QEMU AST2600 synthetic I3C target during probe.
 
 Signed-off-by: qemu_exp
 ---
- drivers/i3c/i3c-synthetic-target-test.c | 117 +++++++++++++++++++++++++++++++
- 1 file changed, 117 insertions(+)
+ drivers/i3c/i3c-synthetic-target-test.c | 158 +++++++++++++++++++++++++++++++
+ 1 file changed, 158 insertions(+)
  create mode 100644 drivers/i3c/i3c-synthetic-target-test.c
 
-diff --git a/drivers/i3c/i3c-synthetic-target-test.c
+diff --git a/drivers/i3c/i3c-synthetic-target-test.c b/drivers/i3c/i3c-synthetic-target-test.c
 new file mode 100644
 --- /dev/null
 +++ b/drivers/i3c/i3c-synthetic-target-test.c
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,158 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * qemu_exp synthetic I3C target private SDR test.
@@ -27,6 +27,7 @@ new file mode 100644
 +#define SYNTH_TEST_REG          0x10
 +#define SYNTH_TEST_RESET_VALUE  0xa5
 +#define SYNTH_TEST_WRITE_VALUE  0x5a
++#define SYNTH_TEST_IBI_VALUE    0x7c
 +
 +static int synth_i3c_read_reg(struct i3c_device *i3cdev, u8 reg, u8 *val)
 +{
@@ -78,6 +79,46 @@ new file mode 100644
 +	return 0;
 +}
 +
++static void synth_i3c_ibi_handler(struct i3c_device *i3cdev,
++				  const struct i3c_ibi_payload *payload)
++{
++	struct device *dev = i3cdev_to_dev(i3cdev);
++	const u8 *data = payload->data;
++
++	if (payload->len != 1 || data[0] != SYNTH_TEST_IBI_VALUE) {
++		dev_err(dev, "unexpected IBI payload len=%u value=0x%02x\n",
++			payload->len, payload->len ? data[0] : 0);
++		return;
++	}
++
++	dev_info(dev, "IBI received len=%u payload=0x%02x\n",
++		 payload->len, data[0]);
++}
++
++static int synth_i3c_enable_ibi(struct i3c_device *i3cdev)
++{
++	struct device *dev = i3cdev_to_dev(i3cdev);
++	const struct i3c_ibi_setup setup = {
++		.max_payload_len = 1,
++		.num_slots = 1,
++		.handler = synth_i3c_ibi_handler,
++	};
++	int ret;
++
++	ret = i3c_device_request_ibi(i3cdev, &setup);
++	if (ret)
++		return dev_err_probe(dev, ret, "request IBI failed\n");
++
++	ret = i3c_device_enable_ibi(i3cdev);
++	if (ret) {
++		i3c_device_free_ibi(i3cdev);
++		return dev_err_probe(dev, ret, "enable IBI failed\n");
++	}
++
++	dev_info(dev, "IBI enabled\n");
++	return 0;
++}
++
 +static int synth_i3c_probe(struct i3c_device *i3cdev)
 +{
 +	struct device *dev = i3cdev_to_dev(i3cdev);
@@ -112,7 +153,7 @@ new file mode 100644
 +	if (ret)
 +		return ret;
 +
-+	return 0;
++	return synth_i3c_enable_ibi(i3cdev);
 +}
 +
 +static const struct i3c_device_id synth_i3c_ids[] = {

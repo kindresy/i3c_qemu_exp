@@ -132,6 +132,11 @@ if ! rg -q "i3c-synthetic-target-test .*malformed private SDR write rejected" "$
     exit 1
 fi
 
+if ! rg -q "i3c-synthetic-target-test .*IBI received len=1 payload=0x7c" "$LOG"; then
+    echo "I3C synthetic target IBI test did not pass; see $LOG" >&2
+    exit 1
+fi
+
 hotjoin_states="$(perl -ne '
     s/\e\[[0-9;]*m//g;
     if (/__I3C_HOTJOIN_BEGIN__/) { $in = 1; next; }

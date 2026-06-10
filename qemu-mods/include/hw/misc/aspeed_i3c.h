@@ -44,6 +44,11 @@ struct AspeedI3CState {
     uint8_t rx_len;
     uint8_t tx_fifo[ASPEED_I3C_TX_FIFO_SIZE];
     uint8_t tx_len;
+    uint32_t ibi_status;
+    uint8_t ibi_payload[ASPEED_I3C_RX_FIFO_SIZE];
+    uint8_t ibi_payload_len;
+    uint8_t ibi_payload_pos;
+    bool ibi_status_pending;
     uint32_t synth_target_count;
     uint64_t synth_pid0;
     uint64_t synth_pid1;
