@@ -1,5 +1,5 @@
 #!/bin/bash
-# Verify that the AST2600 QEMU I3C controller exposes at least one I3C target.
+# Verify that the AST2600 QEMU I3C controller exposes synthetic I3C targets.
 
 set -euo pipefail
 
@@ -41,6 +41,18 @@ if [ -z "$targets" ]; then
     echo "no I3C target devices found; see $LOG" >&2
     exit 1
 fi
+
+expected_targets=(
+    "0-123456789abc"
+    "0-123456789abd"
+)
+
+for target in "${expected_targets[@]}"; do
+    if ! grep -qx "$target" <<<"$targets"; then
+        echo "missing expected I3C target $target; found: $targets; see $LOG" >&2
+        exit 1
+    fi
+done
 
 if ! rg -q "i3c-synthetic-target-test .*private SDR read/write OK reg=0x10 value=0x5a" "$LOG"; then
     echo "I3C synthetic target SDR test did not pass; see $LOG" >&2
