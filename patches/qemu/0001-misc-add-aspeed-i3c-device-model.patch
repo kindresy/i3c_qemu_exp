@@ -3,15 +3,15 @@ Subject: [PATCH] hw/misc: add aspeed_i3c device model
 
 New minimal DesignWare-compatible I3C controller model for the AST2600
 machine. Implements MMIO register interface, command/response queues,
-one synthetic I3C target for DAA, basic CCC reads, and private SDR
-register transfers.
+configurable synthetic I3C targets for DAA, basic CCC reads, private SDR
+register transfers, late hotjoin discovery, and a minimal SIR IBI queue.
 
 Signed-off-by: qemu_exp
 ---
- hw/misc/aspeed_i3c.c         | 447 ++++++++++++++++++++++++++++++++++
- include/hw/misc/aspeed_i3c.h |  57 ++++
+ hw/misc/aspeed_i3c.c         | 706 ++++++++++++++++++++++++++++++++++
+ include/hw/misc/aspeed_i3c.h |  75 ++++
  hw/misc/meson.build          |   1 +
- 3 files changed, 453 insertions(+)
+ 3 files changed, 782 insertions(+)
  create mode 100644 hw/misc/aspeed_i3c.c
  create mode 100644 include/hw/misc/aspeed_i3c.h
 
@@ -24,8 +24,8 @@ new file mode 100644
 + * ASPEED AST2600 I3C Controller
 + *
 + * This is a minimal DesignWare-compatible MMIO model for firmware and
-+ * Linux bring-up under the ast2600-evb machine. It models one synthetic
-+ * I3C target for DAA, basic CCC reads, and private SDR register transfers.
++ * Linux bring-up under the ast2600-evb machine. It models synthetic I3C
++ * targets for DAA, basic CCC reads, and private SDR register transfers.
 + *
 + * SPDX-License-Identifier: GPL-2.0-or-later
 + */
@@ -82,15 +82,17 @@ diff --git a/hw/misc/aspeed_i3c.c
 new file mode 100644
 --- /dev/null
 +++ b/hw/misc/aspeed_i3c.c
-@@ -0,0 +1,447 @@
+@@ -0,0 +1,706 @@
 +/* [full source — see qemu-mods/hw/misc/aspeed_i3c.c for complete file] */
 +
-+This patch adds the full aspeed_i3c.c source (448 lines) implementing:
++This patch adds the full aspeed_i3c.c source (706 lines) implementing:
 + - MMIO read/write ops
 + - Command queue processing (DAA, CCC, private SDR)
 + - Response queue with IRQ signaling
 + - TX/RX FIFO management
-+ - Synthetic target register window
++ - Configurable synthetic target register windows
++ - Late target visibility after Linux enables hotjoin
++ - Minimal DW-compatible SIR IBI status/payload queue
 + - Device reset and VMState migration
 + - QOM type registration (aspeed.i3c, aspeed.i3c-ast2600)
 
