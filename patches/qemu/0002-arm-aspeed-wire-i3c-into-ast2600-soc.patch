@@ -1,0 +1,35 @@
+From: qemu_exp
+Subject: [PATCH] hw/arm/aspeed: wire I3C device into AST2600 SoC
+
+Instantiate the aspeed_i3c device in the AST2600 SoC object:
+- Add AspeedI3CState member and include to aspeed_soc.h
+- Initialize child object "i3c0" with TYPE_ASPEED_2600_I3C
+- Map MMIO at 0x1e7a2000, connect IRQ 0 (GIC SPI 102)
+
+Signed-off-by: qemu_exp
+---
+ include/hw/arm/aspeed_soc.h |  2 ++
+ hw/arm/aspeed_soc.c         | 14 ++++++++++++++
+ 2 files changed, 16 insertions(+)
+
+diff --git a/include/hw/arm/aspeed_soc.h
+--- a/include/hw/arm/aspeed_soc.h
++++ b/include/hw/arm/aspeed_soc.h
+@@ -34,0 +1 @@
++#include "hw/misc/aspeed_i3c.h"
+@@ -71,0 +1 @@
++    AspeedI3CState i3c;
+
+diff --git a/hw/arm/aspeed_soc.c
+--- a/hw/arm/aspeed_soc.c
++++ b/hw/arm/aspeed_soc.c
+@@ -159,0 +1 @@
++    object_initialize_child(obj, "i3c0", &s->i3c, TYPE_ASPEED_2600_I3C);
+@@ -360,0 +3 @@
++    if (!sysbus_realize(SYS_BUS_DEVICE(&s->i3c), errp)) {
++        return;
++    }
++    sysbus_mmio_map(SYS_BUS_DEVICE(&s->i3c), 0,
++                    0x1e7a2000);
++    sysbus_connect_irq(SYS_BUS_DEVICE(&s->i3c), 0,
++                       102);

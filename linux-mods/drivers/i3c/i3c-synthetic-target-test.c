@@ -1,0 +1,93 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * qemu_exp synthetic I3C target private SDR test.
+ */
+
+#include <linux/i3c/device.h>
+#include <linux/module.h>
+
+#define SYNTH_TEST_REG          0x10
+#define SYNTH_TEST_RESET_VALUE  0xa5
+#define SYNTH_TEST_WRITE_VALUE  0x5a
+
+static int synth_i3c_read_reg(struct i3c_device *i3cdev, u8 reg, u8 *val)
+{
+	struct i3c_xfer xfers[] = {
+		{
+			.rnw = false,
+			.len = 1,
+			.data.out = &reg,
+		},
+		{
+			.rnw = true,
+			.len = 1,
+			.data.in = val,
+		},
+	};
+
+	return i3c_device_do_xfers(i3cdev, xfers, ARRAY_SIZE(xfers), I3C_SDR);
+}
+
+static int synth_i3c_write_reg(struct i3c_device *i3cdev, u8 reg, u8 val)
+{
+	u8 buf[] = { reg, val };
+	struct i3c_xfer xfer = {
+		.rnw = false,
+		.len = sizeof(buf),
+		.data.out = buf,
+	};
+
+	return i3c_device_do_xfers(i3cdev, &xfer, 1, I3C_SDR);
+}
+
+static int synth_i3c_probe(struct i3c_device *i3cdev)
+{
+	struct device *dev = i3cdev_to_dev(i3cdev);
+	u8 val;
+	int ret;
+
+	ret = synth_i3c_read_reg(i3cdev, SYNTH_TEST_REG, &val);
+	if (ret)
+		return dev_err_probe(dev, ret, "initial private SDR read failed\n");
+
+	if (val != SYNTH_TEST_RESET_VALUE)
+		return dev_err_probe(dev, -EIO,
+				     "unexpected reset value 0x%02x\n", val);
+
+	ret = synth_i3c_write_reg(i3cdev, SYNTH_TEST_REG,
+				  SYNTH_TEST_WRITE_VALUE);
+	if (ret)
+		return dev_err_probe(dev, ret, "private SDR write failed\n");
+
+	ret = synth_i3c_read_reg(i3cdev, SYNTH_TEST_REG, &val);
+	if (ret)
+		return dev_err_probe(dev, ret, "final private SDR read failed\n");
+
+	if (val != SYNTH_TEST_WRITE_VALUE)
+		return dev_err_probe(dev, -EIO,
+				     "unexpected final value 0x%02x\n", val);
+
+	dev_info(dev, "private SDR read/write OK reg=0x%02x value=0x%02x\n",
+		 SYNTH_TEST_REG, val);
+
+	return 0;
+}
+
+static const struct i3c_device_id synth_i3c_ids[] = {
+	I3C_DEVICE_EXTRA_INFO(0x091a, 0x5678, 0x0abc, NULL),
+	{ },
+};
+MODULE_DEVICE_TABLE(i3c, synth_i3c_ids);
+
+static struct i3c_driver synth_i3c_driver = {
+	.driver = {
+		.name = "i3c-synthetic-target-test",
+	},
+	.probe = synth_i3c_probe,
+	.id_table = synth_i3c_ids,
+};
+module_i3c_driver(synth_i3c_driver);
+
+MODULE_AUTHOR("qemu_exp");
+MODULE_DESCRIPTION("Synthetic I3C target private SDR test");
+MODULE_LICENSE("GPL");

@@ -1,0 +1,21 @@
+# Downstream source trees — tracked via patches only
+linux/
+qemu-6.2+dfsg/
+
+# Binary artifacts — regenerable
+*.cpio.gz
+*.tar.xz
+*.dsc
+ast2600_initramfs.cpio.gz
+
+# Build artifacts
+_modules/
+build-arm-softmmu/
+*.o
+*.pyc
+
+# IDE / tool directories
+.claude/
+.agents/
+.codex/
+.tools/
