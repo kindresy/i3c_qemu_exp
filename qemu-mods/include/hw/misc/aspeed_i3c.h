@@ -53,6 +53,8 @@ struct AspeedI3CState {
     uint8_t synth_dcr1;
     uint8_t synth_reset_value0;
     uint8_t synth_reset_value1;
+    uint32_t synth_late_target_count;
+    bool late_targets_visible;
     uint8_t target_regs[ASPEED_I3C_SYNTH_TARGET_COUNT]
                        [ASPEED_I3C_TARGET_REG_SIZE];
     uint8_t target_reg_ptr[ASPEED_I3C_SYNTH_TARGET_COUNT];

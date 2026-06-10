@@ -17,6 +17,8 @@
 #include "hw/qdev-properties.h"
 #include "migration/vmstate.h"
 
+#define I3C_DEVICE_CTRL                 0x00
+#define I3C_DEVICE_CTRL_HOT_JOIN_NACK   BIT(8)
 #define I3C_COMMAND_QUEUE_PORT          0x0c
 #define I3C_RESPONSE_QUEUE_PORT         0x10
 #define I3C_RX_TX_DATA_PORT             0x14
@@ -65,7 +67,19 @@
 
 static uint32_t aspeed_i3c_active_target_count(AspeedI3CState *s)
 {
-    return MIN(s->synth_target_count, (uint32_t)ASPEED_I3C_SYNTH_TARGET_COUNT);
+    uint32_t count = s->synth_target_count;
+
+    if (s->late_targets_visible) {
+        count += s->synth_late_target_count;
+    }
+
+    return MIN(count, (uint32_t)ASPEED_I3C_SYNTH_TARGET_COUNT);
+}
+
+static uint32_t aspeed_i3c_reset_target_count(AspeedI3CState *s)
+{
+    return MIN(s->synth_target_count + s->synth_late_target_count,
+               (uint32_t)ASPEED_I3C_SYNTH_TARGET_COUNT);
 }
 
 static uint64_t aspeed_i3c_target_pid(AspeedI3CState *s, int target)
@@ -430,6 +444,14 @@ static void aspeed_i3c_write(void *opaque, hwaddr addr, uint64_t value,
     }
 
     switch (addr) {
+    case I3C_DEVICE_CTRL:
+        if ((s->regs[TO_REG(addr)] & I3C_DEVICE_CTRL_HOT_JOIN_NACK) &&
+            !(val32 & I3C_DEVICE_CTRL_HOT_JOIN_NACK) &&
+            s->synth_late_target_count) {
+            s->late_targets_visible = true;
+        }
+        s->regs[TO_REG(addr)] = val32;
+        break;
     case I3C_COMMAND_QUEUE_PORT:
         if (s->have_cmd_hi) {
             s->have_cmd_hi = false;
@@ -495,7 +517,8 @@ static void aspeed_i3c_reset(DeviceState *dev)
     memset(s->target_dyn_addr, 0, sizeof(s->target_dyn_addr));
     memset(s->target_dat_index, I3C_SYNTH_INVALID_DAT_INDEX,
            sizeof(s->target_dat_index));
-    for (i = 0; i < aspeed_i3c_active_target_count(s); i++) {
+    s->late_targets_visible = false;
+    for (i = 0; i < aspeed_i3c_reset_target_count(s); i++) {
         s->target_regs[i][I3C_SYNTH_TEST_REG] =
             aspeed_i3c_target_reset_value(s, i);
     }
@@ -528,6 +551,8 @@ static const VMStateDescription aspeed_i3c_vmstate = {
         VMSTATE_UINT8(synth_dcr1, AspeedI3CState),
         VMSTATE_UINT8(synth_reset_value0, AspeedI3CState),
         VMSTATE_UINT8(synth_reset_value1, AspeedI3CState),
+        VMSTATE_UINT32(synth_late_target_count, AspeedI3CState),
+        VMSTATE_BOOL(late_targets_visible, AspeedI3CState),
         VMSTATE_UINT8_2DARRAY(target_regs, AspeedI3CState,
                               ASPEED_I3C_SYNTH_TARGET_COUNT,
                               ASPEED_I3C_TARGET_REG_SIZE),
@@ -562,6 +587,8 @@ static Property aspeed_i3c_properties[] = {
                       synth_reset_value0, I3C_SYNTH_TEST_RESET_VALUE),
     DEFINE_PROP_UINT8("synth-reset-value1", AspeedI3CState,
                       synth_reset_value1, I3C_SYNTH_TEST_RESET_VALUE),
+    DEFINE_PROP_UINT32("synth-late-target-count", AspeedI3CState,
+                       synth_late_target_count, 0),
     DEFINE_PROP_END_OF_LIST(),
 };
 
