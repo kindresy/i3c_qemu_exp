@@ -14,6 +14,7 @@
 #include "qemu/log.h"
 #include "hw/irq.h"
 #include "hw/misc/aspeed_i3c.h"
+#include "hw/qdev-properties.h"
 #include "migration/vmstate.h"
 
 #define I3C_COMMAND_QUEUE_PORT          0x0c
@@ -62,17 +63,37 @@
 
 #define TO_REG(addr) ((addr) / sizeof(uint32_t))
 
-static const uint64_t aspeed_i3c_synth_pids[ASPEED_I3C_SYNTH_TARGET_COUNT] = {
-    I3C_SYNTH_PID,
-    I3C_SYNTH_PID + 1,
-};
+static uint32_t aspeed_i3c_active_target_count(AspeedI3CState *s)
+{
+    return MIN(s->synth_target_count, (uint32_t)ASPEED_I3C_SYNTH_TARGET_COUNT);
+}
+
+static uint64_t aspeed_i3c_target_pid(AspeedI3CState *s, int target)
+{
+    return target ? s->synth_pid1 : s->synth_pid0;
+}
+
+static uint8_t aspeed_i3c_target_bcr(AspeedI3CState *s, int target)
+{
+    return target ? s->synth_bcr1 : s->synth_bcr0;
+}
+
+static uint8_t aspeed_i3c_target_dcr(AspeedI3CState *s, int target)
+{
+    return target ? s->synth_dcr1 : s->synth_dcr0;
+}
+
+static uint8_t aspeed_i3c_target_reset_value(AspeedI3CState *s, int target)
+{
+    return target ? s->synth_reset_value1 : s->synth_reset_value0;
+}
 
 static int aspeed_i3c_find_target_by_dev_index(AspeedI3CState *s,
                                                uint32_t dev_index)
 {
     int i;
 
-    for (i = 0; i < ASPEED_I3C_SYNTH_TARGET_COUNT; i++) {
+    for (i = 0; i < aspeed_i3c_active_target_count(s); i++) {
         if (s->target_assigned[i] && s->target_dat_index[i] == dev_index) {
             return i;
         }
@@ -85,7 +106,7 @@ static int aspeed_i3c_find_unassigned_target(AspeedI3CState *s)
 {
     int i;
 
-    for (i = 0; i < ASPEED_I3C_SYNTH_TARGET_COUNT; i++) {
+    for (i = 0; i < aspeed_i3c_active_target_count(s); i++) {
         if (!s->target_assigned[i]) {
             return i;
         }
@@ -213,22 +234,22 @@ static void aspeed_i3c_prepare_ccc_read(AspeedI3CState *s, uint32_t cmd_hi,
 
     switch (I3C_COMMAND_PORT_CMD(cmd_lo)) {
     case I3C_CCC_GETPID:
-        payload[0] = extract64(aspeed_i3c_synth_pids[target], 40, 8);
-        payload[1] = extract64(aspeed_i3c_synth_pids[target], 32, 8);
-        payload[2] = extract64(aspeed_i3c_synth_pids[target], 24, 8);
-        payload[3] = extract64(aspeed_i3c_synth_pids[target], 16, 8);
-        payload[4] = extract64(aspeed_i3c_synth_pids[target], 8, 8);
-        payload[5] = extract64(aspeed_i3c_synth_pids[target], 0, 8);
+        payload[0] = extract64(aspeed_i3c_target_pid(s, target), 40, 8);
+        payload[1] = extract64(aspeed_i3c_target_pid(s, target), 32, 8);
+        payload[2] = extract64(aspeed_i3c_target_pid(s, target), 24, 8);
+        payload[3] = extract64(aspeed_i3c_target_pid(s, target), 16, 8);
+        payload[4] = extract64(aspeed_i3c_target_pid(s, target), 8, 8);
+        payload[5] = extract64(aspeed_i3c_target_pid(s, target), 0, 8);
         *data_len = MIN(len, 6U);
         aspeed_i3c_load_rx_fifo(s, payload, *data_len);
         break;
     case I3C_CCC_GETBCR:
-        payload[0] = I3C_SYNTH_BCR;
+        payload[0] = aspeed_i3c_target_bcr(s, target);
         *data_len = MIN(len, 1U);
         aspeed_i3c_load_rx_fifo(s, payload, *data_len);
         break;
     case I3C_CCC_GETDCR:
-        payload[0] = I3C_SYNTH_DCR;
+        payload[0] = aspeed_i3c_target_dcr(s, target);
         *data_len = MIN(len, 1U);
         aspeed_i3c_load_rx_fifo(s, payload, *data_len);
         break;
@@ -474,9 +495,9 @@ static void aspeed_i3c_reset(DeviceState *dev)
     memset(s->target_dyn_addr, 0, sizeof(s->target_dyn_addr));
     memset(s->target_dat_index, I3C_SYNTH_INVALID_DAT_INDEX,
            sizeof(s->target_dat_index));
-    for (i = 0; i < ASPEED_I3C_SYNTH_TARGET_COUNT; i++) {
+    for (i = 0; i < aspeed_i3c_active_target_count(s); i++) {
         s->target_regs[i][I3C_SYNTH_TEST_REG] =
-            I3C_SYNTH_TEST_RESET_VALUE;
+            aspeed_i3c_target_reset_value(s, i);
     }
     aspeed_i3c_reset_fifos(s);
 }
@@ -498,6 +519,15 @@ static const VMStateDescription aspeed_i3c_vmstate = {
         VMSTATE_UINT8(rx_len, AspeedI3CState),
         VMSTATE_UINT8_ARRAY(tx_fifo, AspeedI3CState, ASPEED_I3C_TX_FIFO_SIZE),
         VMSTATE_UINT8(tx_len, AspeedI3CState),
+        VMSTATE_UINT32(synth_target_count, AspeedI3CState),
+        VMSTATE_UINT64(synth_pid0, AspeedI3CState),
+        VMSTATE_UINT64(synth_pid1, AspeedI3CState),
+        VMSTATE_UINT8(synth_bcr0, AspeedI3CState),
+        VMSTATE_UINT8(synth_bcr1, AspeedI3CState),
+        VMSTATE_UINT8(synth_dcr0, AspeedI3CState),
+        VMSTATE_UINT8(synth_dcr1, AspeedI3CState),
+        VMSTATE_UINT8(synth_reset_value0, AspeedI3CState),
+        VMSTATE_UINT8(synth_reset_value1, AspeedI3CState),
         VMSTATE_UINT8_2DARRAY(target_regs, AspeedI3CState,
                               ASPEED_I3C_SYNTH_TARGET_COUNT,
                               ASPEED_I3C_TARGET_REG_SIZE),
@@ -513,6 +543,28 @@ static const VMStateDescription aspeed_i3c_vmstate = {
     },
 };
 
+static Property aspeed_i3c_properties[] = {
+    DEFINE_PROP_UINT32("synth-target-count", AspeedI3CState,
+                       synth_target_count, ASPEED_I3C_SYNTH_TARGET_COUNT),
+    DEFINE_PROP_UINT64("synth-pid0", AspeedI3CState, synth_pid0,
+                       I3C_SYNTH_PID),
+    DEFINE_PROP_UINT64("synth-pid1", AspeedI3CState, synth_pid1,
+                       I3C_SYNTH_PID + 1),
+    DEFINE_PROP_UINT8("synth-bcr0", AspeedI3CState, synth_bcr0,
+                      I3C_SYNTH_BCR),
+    DEFINE_PROP_UINT8("synth-bcr1", AspeedI3CState, synth_bcr1,
+                      I3C_SYNTH_BCR),
+    DEFINE_PROP_UINT8("synth-dcr0", AspeedI3CState, synth_dcr0,
+                      I3C_SYNTH_DCR),
+    DEFINE_PROP_UINT8("synth-dcr1", AspeedI3CState, synth_dcr1,
+                      I3C_SYNTH_DCR),
+    DEFINE_PROP_UINT8("synth-reset-value0", AspeedI3CState,
+                      synth_reset_value0, I3C_SYNTH_TEST_RESET_VALUE),
+    DEFINE_PROP_UINT8("synth-reset-value1", AspeedI3CState,
+                      synth_reset_value1, I3C_SYNTH_TEST_RESET_VALUE),
+    DEFINE_PROP_END_OF_LIST(),
+};
+
 static void aspeed_i3c_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -521,6 +573,7 @@ static void aspeed_i3c_class_init(ObjectClass *klass, void *data)
     dc->realize = aspeed_i3c_realize;
     dc->reset = aspeed_i3c_reset;
     dc->vmsd = &aspeed_i3c_vmstate;
+    device_class_set_props(dc, aspeed_i3c_properties);
 }
 
 static const TypeInfo aspeed_i3c_info = {

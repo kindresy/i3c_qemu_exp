@@ -9,6 +9,8 @@ INITRD="${INITRD:-ast2600_initramfs.cpio.gz}"
 LOG="${LOG:-/tmp/qemu_ast2600_i3c.log}"
 APPEND="${APPEND:-console=ttyS4,115200n8 root=/dev/ram rw loglevel=8}"
 QEMU="${QEMU:-qemu-system-arm}"
+QEMU_EXTRA_ARGS="${QEMU_EXTRA_ARGS:-}"
+QEMU_I3C_TARGET_COUNT="${QEMU_I3C_TARGET_COUNT:-}"
 
 for file in "$KERNEL" "$DTB" "$INITRD"; do
     if [ ! -f "$file" ]; then
@@ -24,6 +26,10 @@ echo "Initrd: $INITRD"
 echo "QEMU: $QEMU"
 echo "Log: $LOG"
 
+if [ -n "$QEMU_I3C_TARGET_COUNT" ]; then
+    QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -global driver=aspeed.i3c-ast2600,property=synth-target-count,value=$QEMU_I3C_TARGET_COUNT"
+fi
+
 "$QEMU" \
     -M ast2600-evb \
     -kernel "$KERNEL" \
@@ -32,4 +38,5 @@ echo "Log: $LOG"
     -append "$APPEND" \
     -nographic \
     -no-reboot \
+    $QEMU_EXTRA_ARGS \
     2>&1 | tee "$LOG"

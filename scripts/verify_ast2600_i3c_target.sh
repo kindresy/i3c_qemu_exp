@@ -6,6 +6,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 QEMU_BIN="${QEMU:-$ROOT_DIR/qemu-6.2+dfsg/build-arm-softmmu/qemu-system-arm}"
 LOG="${LOG:-/tmp/qemu_ast2600_i3c_target_verify.log}"
+EXPECT_TARGETS="${EXPECT_TARGETS:-0-123456789abc 0-123456789abd}"
+QEMU_I3C_TARGET_COUNT="${QEMU_I3C_TARGET_COUNT:-}"
 
 if [ ! -x "$QEMU_BIN" ]; then
     echo "missing executable QEMU: $QEMU_BIN" >&2
@@ -52,17 +54,19 @@ if [ -z "$targets" ]; then
     exit 1
 fi
 
-expected_targets=(
-    "0-123456789abc"
-    "0-123456789abd"
-)
-
-for target in "${expected_targets[@]}"; do
+for target in $EXPECT_TARGETS; do
     if ! grep -qx "$target" <<<"$targets"; then
         echo "missing expected I3C target $target; found: $targets; see $LOG" >&2
         exit 1
     fi
 done
+
+expected_count="$(wc -w <<<"$EXPECT_TARGETS")"
+actual_count="$(wc -l <<<"$targets")"
+if [ "$actual_count" -ne "$expected_count" ]; then
+    echo "unexpected I3C target count $actual_count; expected $expected_count; found: $targets; see $LOG" >&2
+    exit 1
+fi
 
 if ! rg -q "i3c-synthetic-target-test .*private SDR read/write OK reg=0x10 value=0x5a" "$LOG"; then
     echo "I3C synthetic target SDR test did not pass; see $LOG" >&2
