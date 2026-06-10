@@ -1,0 +1,331 @@
+diff --git a/drivers/i3c/device.c b/drivers/i3c/device.c
+index 101eaa77d..52b1bacfc 100644
+--- a/drivers/i3c/device.c
++++ b/drivers/i3c/device.c
+@@ -38,6 +38,9 @@ int i3c_device_do_xfers(struct i3c_device *dev, struct i3c_xfer *xfers,
+ {
+ 	int ret, i;
+ 
++	dev_info(i3cdev_to_dev(dev), "i3c: device_do_xfers nxfers=%d mode=%d\n",
++		 nxfers, mode);
++
+ 	if (nxfers < 1)
+ 		return 0;
+ 
+diff --git a/drivers/i3c/master.c b/drivers/i3c/master.c
+index 5cd4e5da2..ce81ab7b9 100644
+--- a/drivers/i3c/master.c
++++ b/drivers/i3c/master.c
+@@ -1511,6 +1511,9 @@ static int i3c_master_retrieve_dev_info(struct i3c_dev_desc *dev)
+ 	enum i3c_addr_slot_status slot_status;
+ 	int ret;
+ 
++	pr_info("i3c: retrieve_dev_info dyn_addr=0x%02x\n",
++		dev->info.dyn_addr);
++
+ 	if (!dev->info.dyn_addr)
+ 		return -EINVAL;
+ 
+@@ -2062,6 +2065,8 @@ static int i3c_master_bus_init(struct i3c_master_controller *master)
+ 	struct i2c_dev_desc *i2cdev;
+ 	int ret;
+ 
++	pr_info("i3c: bus_init start, attaching boardinfo devices\n");
++
+ 	/*
+ 	 * First attach all devices with static definitions provided by the
+ 	 * FW.
+@@ -2098,6 +2103,7 @@ static int i3c_master_bus_init(struct i3c_master_controller *master)
+ 	 * might configure its internal logic to match the bus limitations.
+ 	 */
+ 	ret = master->ops->bus_init(master);
++	pr_info("i3c: controller bus_init returned %d\n", ret);
+ 	if (ret)
+ 		goto err_detach_devs;
+ 
+@@ -2123,6 +2129,7 @@ static int i3c_master_bus_init(struct i3c_master_controller *master)
+ 	 * (assigned by the bootloader for example).
+ 	 */
+ 	ret = i3c_master_rstdaa_locked(master, I3C_BROADCAST_ADDR);
++	pr_info("i3c: rstdaa before DAA returned %d\n", ret);
+ 	if (ret)
+ 		goto err_bus_cleanup;
+ 
+@@ -2139,6 +2146,7 @@ static int i3c_master_bus_init(struct i3c_master_controller *master)
+ 	ret = i3c_master_enec_disec_locked(master, I3C_BROADCAST_ADDR, false,
+ 					   I3C_CCC_EVENT_SIR | I3C_CCC_EVENT_MR |
+ 					   I3C_CCC_EVENT_HJ, true);
++	pr_info("i3c: DISEC before DAA returned %d\n", ret);
+ 	if (ret)
+ 		goto err_bus_cleanup;
+ 
+@@ -2183,7 +2191,9 @@ static int i3c_master_bus_init(struct i3c_master_controller *master)
+ 			i3c_master_early_i3c_dev_add(master, i3cboardinfo);
+ 	}
+ 
++	pr_info("i3c: do_daa start\n");
+ 	ret = i3c_master_do_daa(master);
++	pr_info("i3c: do_daa returned %d\n", ret);
+ 	if (ret)
+ 		goto err_rstdaa;
+ 
+@@ -2274,6 +2284,8 @@ int i3c_master_add_i3c_dev_locked(struct i3c_master_controller *master,
+ 	bool enable_ibi = false;
+ 	int ret;
+ 
++	pr_info("i3c: add_i3c_dev_locked addr=0x%02x\n", addr);
++
+ 	if (!master)
+ 		return -EINVAL;
+ 
+@@ -3014,6 +3026,8 @@ int i3c_master_register(struct i3c_master_controller *master,
+ 	struct i2c_dev_boardinfo *i2cbi;
+ 	int ret;
+ 
++	pr_info("i3c: master_register start, secondary=%d\n", secondary);
++
+ 	/* We do not support secondary masters yet. */
+ 	if (secondary)
+ 		return -EOPNOTSUPP;
+@@ -3042,6 +3056,7 @@ int i3c_master_register(struct i3c_master_controller *master,
+ 	master->dev.coherent_dma_mask = parent->coherent_dma_mask;
+ 	master->dev.dma_parms = parent->dma_parms;
+ 
++	pr_info("i3c: bus_init id=%d\n", i3cbus->id);
+ 	ret = i3c_bus_init(i3cbus, master->dev.of_node);
+ 	if (ret)
+ 		goto err_put_dev;
+@@ -3085,6 +3100,7 @@ int i3c_master_register(struct i3c_master_controller *master,
+ 		goto err_put_dev;
+ 	}
+ 
++	pr_info("i3c: calling i3c_master_bus_init\n");
+ 	ret = i3c_master_bus_init(master);
+ 	if (ret)
+ 		goto err_put_dev;
+@@ -3111,6 +3127,7 @@ int i3c_master_register(struct i3c_master_controller *master,
+ 	 * We're done initializing the bus and the controller, we can now
+ 	 * register I3C devices discovered during the initial DAA.
+ 	 */
++	pr_info("i3c: init_done, registering new i3c devs\n");
+ 	master->init_done = true;
+ 	i3c_bus_normaluse_lock(&master->bus);
+ 	i3c_master_register_new_i3c_devs(master);
+diff --git a/drivers/i3c/master/ast2600-i3c-master.c b/drivers/i3c/master/ast2600-i3c-master.c
+index e05e83812..604bbd422 100644
+--- a/drivers/i3c/master/ast2600-i3c-master.c
++++ b/drivers/i3c/master/ast2600-i3c-master.c
+@@ -129,6 +129,8 @@ static int ast2600_i3c_probe(struct platform_device *pdev)
+ 	struct ast2600_i3c *i3c;
+ 	int rc;
+ 
++	dev_info(&pdev->dev, "ast2600-i3c: probe start, node=%pOF\n", np);
++
+ 	i3c = devm_kzalloc(&pdev->dev, sizeof(*i3c), GFP_KERNEL);
+ 	if (!i3c)
+ 		return -ENOMEM;
+@@ -145,10 +147,14 @@ static int ast2600_i3c_probe(struct platform_device *pdev)
+ 		return PTR_ERR(i3c->global_regs);
+ 
+ 	i3c->global_idx = gspec.args[0];
++	dev_info(&pdev->dev, "ast2600-i3c: global-regs idx=%d mapped OK\n",
++		 i3c->global_idx);
+ 
+ 	rc = of_property_read_u32(np, "sda-pullup-ohms", &i3c->sda_pullup);
+ 	if (rc)
+ 		i3c->sda_pullup = AST2600_DEFAULT_SDA_PULLUP_OHMS;
++	dev_info(&pdev->dev, "ast2600-i3c: sda-pullup=%d ohms\n",
++		 i3c->sda_pullup);
+ 
+ 	rc = ast2600_i3c_pullup_to_reg(i3c->sda_pullup, NULL);
+ 	if (rc)
+@@ -156,6 +162,7 @@ static int ast2600_i3c_probe(struct platform_device *pdev)
+ 			i3c->sda_pullup);
+ 
+ 	i3c->dw.platform_ops = &ast2600_i3c_ops;
++	dev_info(&pdev->dev, "ast2600-i3c: calling dw_i3c_common_probe\n");
+ 	return dw_i3c_common_probe(&i3c->dw, pdev);
+ }
+ 
+diff --git a/drivers/i3c/master/dw-i3c-master.c b/drivers/i3c/master/dw-i3c-master.c
+index 655693a21..0d409ff98 100644
+--- a/drivers/i3c/master/dw-i3c-master.c
++++ b/drivers/i3c/master/dw-i3c-master.c
+@@ -403,9 +403,14 @@ static void dw_i3c_master_start_xfer_locked(struct dw_i3c_master *master)
+ 	if (!xfer)
+ 		return;
+ 
++	dev_info(master->dev, "dw-i3c: start_xfer ncmds=%u\n", xfer->ncmds);
++
+ 	for (i = 0; i < xfer->ncmds; i++) {
+ 		struct dw_i3c_cmd *cmd = &xfer->cmds[i];
+ 
++		dev_dbg(master->dev,
++			"dw-i3c: cmd[%u] tx_len=%u cmd_hi=0x%x cmd_lo=0x%x\n",
++			i, cmd->tx_len, cmd->cmd_hi, cmd->cmd_lo);
+ 		dw_i3c_master_wr_tx_fifo(master, cmd->tx_buf, cmd->tx_len);
+ 	}
+ 
+@@ -472,6 +477,7 @@ static void dw_i3c_master_end_xfer_locked(struct dw_i3c_master *master, u32 isr)
+ 
+ 	nresp = readl(master->regs + QUEUE_STATUS_LEVEL);
+ 	nresp = QUEUE_STATUS_LEVEL_RESP(nresp);
++	dev_info(master->dev, "dw-i3c: end_xfer nresp=%u\n", nresp);
+ 
+ 	for (i = 0; i < nresp; i++) {
+ 		struct dw_i3c_cmd *cmd;
+@@ -482,6 +488,10 @@ static void dw_i3c_master_end_xfer_locked(struct dw_i3c_master *master, u32 isr)
+ 		cmd = &xfer->cmds[RESPONSE_PORT_TID(resp)];
+ 		cmd->rx_len = RESPONSE_PORT_DATA_LEN(resp);
+ 		cmd->error = RESPONSE_PORT_ERR_STATUS(resp);
++		dev_info(master->dev,
++			 "dw-i3c: resp[%u] tid=%u data_len=%u err=0x%x\n",
++			 i, (unsigned int)RESPONSE_PORT_TID(resp),
++			 cmd->rx_len, cmd->error);
+ 		if (cmd->rx_len && !cmd->error)
+ 			dw_i3c_master_read_rx_fifo(master, cmd->rx_buf,
+ 						   cmd->rx_len);
+@@ -650,6 +660,9 @@ static int dw_i3c_master_bus_init(struct i3c_master_controller *m)
+ 	struct i3c_device_info info = { };
+ 	int ret;
+ 
++	dev_info(master->dev, "dw-i3c: bus_init start, bus_mode=%d\n",
++		 bus->mode);
++
+ 	ret = pm_runtime_resume_and_get(master->dev);
+ 	if (ret < 0) {
+ 		dev_err(master->dev,
+@@ -688,6 +701,7 @@ static int dw_i3c_master_bus_init(struct i3c_master_controller *m)
+ 	master->dev_addr = ret;
+ 	memset(&info, 0, sizeof(info));
+ 	info.dyn_addr = ret;
++	dev_info(master->dev, "dw-i3c: master dyn_addr=0x%02x\n", ret);
+ 
+ 	ret = i3c_master_set_info(&master->base, &info);
+ 	if (ret)
+@@ -695,6 +709,7 @@ static int dw_i3c_master_bus_init(struct i3c_master_controller *m)
+ 
+ 	dw_i3c_master_set_intr_regs(master);
+ 	dw_i3c_master_enable(master);
++	dev_info(master->dev, "dw-i3c: bus_init complete, controller enabled\n");
+ 
+ rpm_out:
+ 	pm_runtime_put_autosuspend(master->dev);
+@@ -798,6 +813,10 @@ static int dw_i3c_master_send_ccc_cmd(struct i3c_master_controller *m,
+ 	struct dw_i3c_master *master = to_dw_i3c_master(m);
+ 	int ret = 0;
+ 
++	dev_info(master->dev,
++		 "dw-i3c: send_ccc ccc_id=0x%02x ndests=%u rnw=%u\n",
++		 ccc->id, ccc->ndests, ccc->rnw);
++
+ 	if (ccc->id == I3C_CCC_ENTDAA)
+ 		return -EINVAL;
+ 
+@@ -833,6 +852,9 @@ static int dw_i3c_master_daa(struct i3c_master_controller *m)
+ 	u8 last_addr = 0;
+ 	int ret, pos;
+ 
++	dev_info(master->dev, "dw-i3c: DAA start, maxdevs=%u free_pos=0x%x\n",
++		 master->maxdevs, master->free_pos);
++
+ 	struct dw_i3c_xfer *xfer __free(kfree) = dw_i3c_master_alloc_xfer(master, 1);
+ 	if (!xfer)
+ 		return -ENOMEM;
+@@ -883,6 +905,9 @@ static int dw_i3c_master_daa(struct i3c_master_controller *m)
+ 		      COMMAND_PORT_ADDR_ASSGN_CMD |
+ 		      COMMAND_PORT_TOC |
+ 		      COMMAND_PORT_ROC;
++	dev_info(master->dev,
++		 "dw-i3c: ENTDAA cmd queued dev_index=%u dev_count=%u\n",
++		 pos, master->maxdevs - pos);
+ 
+ 	dw_i3c_master_enqueue_xfer(master, xfer);
+ 	if (!wait_for_completion_timeout(&xfer->comp, XFER_TIMEOUT))
+@@ -890,6 +915,9 @@ static int dw_i3c_master_daa(struct i3c_master_controller *m)
+ 
+ 	newdevs = GENMASK(master->maxdevs - cmd->rx_len - 1, 0);
+ 	newdevs &= ~olddevs;
++	dev_info(master->dev,
++		 "dw-i3c: DAA result rx_len=%u newdevs=0x%x olddevs=0x%x\n",
++		 cmd->rx_len, newdevs, olddevs);
+ 
+ 	for (pos = 0; pos < master->maxdevs; pos++) {
+ 		if (newdevs & BIT(pos))
+@@ -911,6 +939,10 @@ static int dw_i3c_master_i3c_xfers(struct i3c_dev_desc *dev,
+ 	unsigned int nrxwords = 0, ntxwords = 0;
+ 	int i, ret = 0;
+ 
++	dev_info(master->dev,
++		 "dw-i3c: i3c_xfers start nxfers=%d mode=%d dev_index=%u\n",
++		 i3c_nxfers, mode, data->index);
++
+ 	if (!i3c_nxfers)
+ 		return 0;
+ 
+@@ -979,6 +1011,7 @@ static int dw_i3c_master_i3c_xfers(struct i3c_dev_desc *dev,
+ 	}
+ 
+ 	ret = xfer->ret;
++	dev_info(master->dev, "dw-i3c: i3c_xfers result ret=%d\n", ret);
+ 
+ 	pm_runtime_put_autosuspend(master->dev);
+ 	return ret;
+@@ -1462,6 +1495,7 @@ static irqreturn_t dw_i3c_master_irq_handler(int irq, void *dev_id)
+ 	u32 status;
+ 
+ 	status = readl(master->regs + INTR_STATUS);
++	dev_info(master->dev, "dw-i3c: IRQ status=0x%x\n", status);
+ 
+ 	if (!(status & readl(master->regs + INTR_STATUS_EN))) {
+ 		writel(INTR_ALL, master->regs + INTR_STATUS);
+@@ -1573,14 +1607,17 @@ int dw_i3c_common_probe(struct dw_i3c_master *master,
+ 		master->platform_ops = &dw_i3c_platform_ops_default;
+ 
+ 	master->dev = &pdev->dev;
++	dev_info(master->dev, "dw-i3c: common_probe start\n");
+ 
+ 	master->regs = devm_platform_ioremap_resource(pdev, 0);
+ 	if (IS_ERR(master->regs))
+ 		return PTR_ERR(master->regs);
++	dev_info(master->dev, "dw-i3c: MMIO regs mapped OK\n");
+ 
+ 	master->core_clk = devm_clk_get_enabled(&pdev->dev, NULL);
+ 	if (IS_ERR(master->core_clk))
+ 		return PTR_ERR(master->core_clk);
++	dev_info(master->dev, "dw-i3c: core_clk enabled\n");
+ 
+ 	master->pclk = devm_clk_get_optional_enabled(&pdev->dev, "pclk");
+ 	if (IS_ERR(master->pclk))
+@@ -1598,6 +1635,7 @@ int dw_i3c_common_probe(struct dw_i3c_master *master,
+ 
+ 	writel(INTR_ALL, master->regs + INTR_STATUS);
+ 	irq = platform_get_irq(pdev, 0);
++	dev_info(master->dev, "dw-i3c: irq=%d\n", irq);
+ 	ret = devm_request_irq(&pdev->dev, irq,
+ 			       dw_i3c_master_irq_handler, 0,
+ 			       dev_name(&pdev->dev), master);
+@@ -1622,6 +1660,10 @@ int dw_i3c_common_probe(struct dw_i3c_master *master,
+ 	master->datstartaddr = ret;
+ 	master->maxdevs = ret >> 16;
+ 	master->free_pos = GENMASK(master->maxdevs - 1, 0);
++	dev_info(master->dev,
++		 "dw-i3c: hw caps cmd_fifo=%u data_fifo=%u max_devs=%u dat_start=0x%x\n",
++		 master->caps.cmdfifodepth, master->caps.datafifodepth,
++		 master->maxdevs, master->datstartaddr);
+ 
+ 	if (has_acpi_companion(&pdev->dev)) {
+ 		quirks = (unsigned long)device_get_match_data(&pdev->dev);
+@@ -1639,10 +1681,12 @@ int dw_i3c_common_probe(struct dw_i3c_master *master,
+ 	INIT_WORK(&master->hj_work, dw_i3c_hj_work);
+ 
+ 	device_set_of_node_from_dev(&master->base.i2c.dev, &pdev->dev);
++	dev_info(master->dev, "dw-i3c: calling i3c_master_register\n");
+ 	ret = i3c_master_register(&master->base, &pdev->dev,
+ 				  &dw_mipi_i3c_ops, false);
+ 	if (ret)
+ 		goto err_disable_pm;
++	dev_info(master->dev, "dw-i3c: i3c_master_register OK, probe complete\n");
+ 
+ 	return 0;
+ 

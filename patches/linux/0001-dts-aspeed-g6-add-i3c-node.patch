@@ -1,0 +1,26 @@
+diff --git a/arch/arm/boot/dts/aspeed/aspeed-g6.dtsi b/arch/arm/boot/dts/aspeed/aspeed-g6.dtsi
+index 189bc3bbb..ffae7cf05 100644
+--- a/arch/arm/boot/dts/aspeed/aspeed-g6.dtsi
++++ b/arch/arm/boot/dts/aspeed/aspeed-g6.dtsi
+@@ -1095,4 +1095,21 @@ i2c15: i2c@800 {
+ 		pinctrl-0 = <&pinctrl_i2c16_default>;
+ 		status = "disabled";
+ 	};
++
++};
++
++&{/ahb/apb} {
++	i3c0: i3c@1e7a2000 {
++		compatible = "aspeed,ast2600-i3c";
++		reg = <0x1e7a2000 0x1000>;
++		clocks = <&syscon ASPEED_CLK_APB2>;
++		resets = <&syscon ASPEED_RESET_I3C0>;
++		aspeed,global-regs = <&syscon 0>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&pinctrl_i3c1_default>;
++		interrupts = <GIC_SPI 102 IRQ_TYPE_LEVEL_HIGH>;
++		#address-cells = <3>;
++		#size-cells = <0>;
++		status = "okay";
++	};
+ };

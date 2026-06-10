@@ -1,0 +1,9 @@
+diff --git a/drivers/i3c/Makefile b/drivers/i3c/Makefile
+index 11982efbc..efb800220 100644
+--- a/drivers/i3c/Makefile
++++ b/drivers/i3c/Makefile
+@@ -2,3 +2,4 @@
+ i3c-y				:= device.o master.o
+ obj-$(CONFIG_I3C)		+= i3c.o
+ obj-$(CONFIG_I3C)		+= master/
++obj-$(CONFIG_I3C_SYNTHETIC_TARGET_TEST) += i3c-synthetic-target-test.o
