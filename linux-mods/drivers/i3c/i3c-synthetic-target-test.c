@@ -40,6 +40,26 @@ static int synth_i3c_write_reg(struct i3c_device *i3cdev, u8 reg, u8 val)
 	return i3c_device_do_xfers(i3cdev, &xfer, 1, I3C_SDR);
 }
 
+static int synth_i3c_expect_malformed_write_rejected(struct i3c_device *i3cdev)
+{
+	struct device *dev = i3cdev_to_dev(i3cdev);
+	u8 reg = SYNTH_TEST_REG;
+	struct i3c_xfer xfer = {
+		.rnw = false,
+		.len = 1,
+		.data.out = &reg,
+	};
+	int ret;
+
+	ret = i3c_device_do_xfers(i3cdev, &xfer, 1, I3C_SDR);
+	if (!ret)
+		return dev_err_probe(dev, -EIO,
+				     "malformed private SDR write accepted\n");
+
+	dev_info(dev, "malformed private SDR write rejected ret=%d\n", ret);
+	return 0;
+}
+
 static int synth_i3c_probe(struct i3c_device *i3cdev)
 {
 	struct device *dev = i3cdev_to_dev(i3cdev);
@@ -69,6 +89,10 @@ static int synth_i3c_probe(struct i3c_device *i3cdev)
 
 	dev_info(dev, "private SDR read/write OK reg=0x%02x value=0x%02x\n",
 		 SYNTH_TEST_REG, val);
+
+	ret = synth_i3c_expect_malformed_write_rejected(i3cdev);
+	if (ret)
+		return ret;
 
 	return 0;
 }

@@ -2,19 +2,20 @@ From: qemu_exp
 Subject: [PATCH] i3c: add synthetic-target-test driver source
 
 New built-in test driver that verifies basic private SDR read/write
-transfers against the QEMU AST2600 synthetic I3C target during probe.
+transfers and a malformed private SDR write rejection against the QEMU
+AST2600 synthetic I3C target during probe.
 
 Signed-off-by: qemu_exp
 ---
- drivers/i3c/i3c-synthetic-target-test.c | 79 ++++++++++++++++++++++++++++++++
- 1 file changed, 79 insertions(+)
+ drivers/i3c/i3c-synthetic-target-test.c | 117 +++++++++++++++++++++++++++++++
+ 1 file changed, 117 insertions(+)
  create mode 100644 drivers/i3c/i3c-synthetic-target-test.c
 
 diff --git a/drivers/i3c/i3c-synthetic-target-test.c
 new file mode 100644
 --- /dev/null
 +++ b/drivers/i3c/i3c-synthetic-target-test.c
-@@ -0,0 +1,79 @@
+@@ -0,0 +1,117 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * qemu_exp synthetic I3C target private SDR test.
@@ -57,6 +58,26 @@ new file mode 100644
 +	return i3c_device_do_xfers(i3cdev, &xfer, 1, I3C_SDR);
 +}
 +
++static int synth_i3c_expect_malformed_write_rejected(struct i3c_device *i3cdev)
++{
++	struct device *dev = i3cdev_to_dev(i3cdev);
++	u8 reg = SYNTH_TEST_REG;
++	struct i3c_xfer xfer = {
++		.rnw = false,
++		.len = 1,
++		.data.out = &reg,
++	};
++	int ret;
++
++	ret = i3c_device_do_xfers(i3cdev, &xfer, 1, I3C_SDR);
++	if (!ret)
++		return dev_err_probe(dev, -EIO,
++				     "malformed private SDR write accepted\n");
++
++	dev_info(dev, "malformed private SDR write rejected ret=%d\n", ret);
++	return 0;
++}
++
 +static int synth_i3c_probe(struct i3c_device *i3cdev)
 +{
 +	struct device *dev = i3cdev_to_dev(i3cdev);
@@ -86,6 +107,10 @@ new file mode 100644
 +
 +	dev_info(dev, "private SDR read/write OK reg=0x%02x value=0x%02x\n",
 +		 SYNTH_TEST_REG, val);
++
++	ret = synth_i3c_expect_malformed_write_rejected(i3cdev);
++	if (ret)
++		return ret;
 +
 +	return 0;
 +}

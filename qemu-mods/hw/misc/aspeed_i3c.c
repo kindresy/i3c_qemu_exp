@@ -37,6 +37,7 @@
 #define I3C_COMMAND_PORT_ARG_LEN(x)     (((x) >> 16) & 0xffff)
 #define I3C_COMMAND_PORT_CP             BIT(15)
 #define I3C_COMMAND_PORT_READ_TRANSFER  BIT(28)
+#define I3C_COMMAND_PORT_TOC            BIT(30)
 #define I3C_RESPONSE_PORT_TID(x)        (((x) & 0xf) << 24)
 #define I3C_RESPONSE_PORT_ERR(x)        (((x) & 0xf) << 28)
 
@@ -167,13 +168,23 @@ static void aspeed_i3c_prepare_private_read(AspeedI3CState *s, int target,
 }
 
 static void aspeed_i3c_apply_private_write(AspeedI3CState *s, int target,
-                                           uint32_t len)
+                                           uint32_t cmd_lo, uint32_t len,
+                                           uint32_t *error)
 {
     uint8_t n = MIN(len, (uint32_t)s->tx_len);
     int i;
 
+    *error = 0;
+
     if (!n) {
         aspeed_i3c_clear_tx_fifo(s);
+        *error = I3C_RESPONSE_ERROR_IBA_NACK;
+        return;
+    }
+
+    if (n == 1 && (cmd_lo & I3C_COMMAND_PORT_TOC)) {
+        aspeed_i3c_clear_tx_fifo(s);
+        *error = I3C_RESPONSE_ERROR_IBA_NACK;
         return;
     }
 
@@ -305,7 +316,8 @@ static void aspeed_i3c_push_response(AspeedI3CState *s, uint32_t cmd_lo)
             }
             data_len = 0;
             aspeed_i3c_apply_private_write(
-                s, target, I3C_COMMAND_PORT_ARG_LEN(s->pending_cmd_hi));
+                s, target, cmd_lo,
+                I3C_COMMAND_PORT_ARG_LEN(s->pending_cmd_hi), &error);
         }
         break;
     }
